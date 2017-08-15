@@ -3,4 +3,4 @@ scala:
 - 2.11.7
 jdk:
 - oraclejdk8
-script: sbt test
+script: sbt -Dakka.test.timefactor=2 test

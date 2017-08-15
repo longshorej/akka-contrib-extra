@@ -13,3 +13,7 @@ libraryDependencies ++= List(
   Library.mockitoAll      % "test",
   Library.scalaTest       % "test"
 )
+
+fork in Test := true
+javaOptions in Test += s"""-Dakka.test.timefactor=${sys.props.getOrElse("akka.test.timefactor", "1")}"""
+concurrentRestrictions in Global += Tags.limit(Tags.Test, 1)
