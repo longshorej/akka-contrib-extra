@@ -94,6 +94,8 @@ class NonBlockingProcessSpec extends WordSpec with Matchers with BeforeAndAfterA
 
       exitProbe.watch(process)
 
+      streamProbe.expectMsg(NonBlockingReceiver.Out("Starting"))
+
       process ! NonBlockingProcess.Destroy
 
       exitProbe.fishForMessage(5.seconds) {

@@ -89,6 +89,8 @@ class BlockingProcessSpec extends WordSpec with Matchers with BeforeAndAfterAll 
 
       probe.watch(process)
 
+      probe.expectMsg(Receiver.Out("Starting"))
+
       process ! BlockingProcess.Destroy
 
       probe.fishForMessage(5.seconds) {
