@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 
-logger my pid is $$
+pid=$$
 
-trap 'logger killing $$; kill -9 $$' SIGTERM
+trap 'kill -9 $pid' SIGTERM
+
+printf "Starting"
 
 1>&2 sleep 8 &
 wait
