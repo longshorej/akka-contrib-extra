@@ -20,9 +20,10 @@ import scala.concurrent.duration.{ Duration, DurationInt }
 
 class NonBlockingProcessSpec extends WordSpec with Matchers with BeforeAndAfterAll {
 
-  implicit val system = ActorSystem("test", testConfig)
+  implicit val system = ActorSystem("nonblocking-test", testConfig)
 
-  implicit val processCreationTimeout = Timeout(2.seconds)
+  import akka.testkit._
+  implicit val processCreationTimeout = Timeout(2.seconds.dilated)
 
   "A NonBlockingProcess" should {
     "read from stdin and write to stdout" in {

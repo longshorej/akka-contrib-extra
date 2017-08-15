@@ -174,6 +174,7 @@ class NonBlockingProcess(
             .toMat(BroadcastHub.sink)(Keep.both)
             .run
 
+        // FIXME: if we don't consume from stdout/stderr then we know that NuProcess will spin the CPU - see https://github.com/brettwooldridge/NuProcess/issues/53
         nuProcess.setProcessHandler(new NuAbstractProcessHandler {
           override def onStart(nuProcess: NuProcess): Unit =
             parent ! Started(nuProcess.getPID, stdin, stdout, stderr)
