@@ -173,9 +173,11 @@ class NonBlockingProcess(
             .fromGraph(new PublishIfAvailable[ByteString])
             .toMat(BroadcastHub.sink)(Keep.both)
             .run
-        parent ! Started(nuProcess.getPID, stdin, stdout, stderr)
 
         nuProcess.setProcessHandler(new NuAbstractProcessHandler {
+          override def onStart(nuProcess: NuProcess): Unit =
+            parent ! Started(nuProcess.getPID, stdin, stdout, stderr)
+
           override def onStderr(buffer: ByteBuffer, closed: Boolean): Unit =
             if (!closed)
               err.publishIfAvailable(() => ByteString.fromByteBuffer(buffer))
