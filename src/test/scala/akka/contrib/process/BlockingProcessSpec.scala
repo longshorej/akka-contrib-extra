@@ -79,7 +79,7 @@ class BlockingProcessSpec extends WordSpec with Matchers with BeforeAndAfterAll 
       }
     }
 
-    "detect when a process has exited of its own accord" ignore {
+    "detect when a process has exited while having orphaned children that live on" in {
       val command = getClass.getResource("/loop.sh").getFile
       new File(command).setExecutable(true)
       val nameSeed = scala.concurrent.forkjoin.ThreadLocalRandom.current().nextLong()
@@ -89,11 +89,14 @@ class BlockingProcessSpec extends WordSpec with Matchers with BeforeAndAfterAll 
 
       probe.watch(process)
 
-      probe.expectMsg(Receiver.Out("Starting"))
+      // send loop.sh a sigterm, which it will trap and then sigkill itself, while
+      // its child lives on
+
+      probe.expectMsg(Receiver.Out("ready"))
 
       process ! BlockingProcess.Destroy
 
-      probe.fishForMessage(5.seconds) {
+      probe.fishForMessage() {
         case BlockingProcess.Exited(r) => true
         case _                         => false
       }
@@ -146,7 +149,6 @@ class Receiver(probe: ActorRef, command: String, stdinInput: immutable.Seq[Strin
   override def receive: Receive = {
     case Process =>
       sender() ! process
-
     case BlockingProcess.Started(stdin, stdout, stderr) =>
       stdout
         .map(element => Out(element.utf8String))
@@ -155,6 +157,8 @@ class Receiver(probe: ActorRef, command: String, stdinInput: immutable.Seq[Strin
         .onComplete(_ => self ! "flow-complete")
 
       Source(stdinInput).map(ByteString.apply).runWith(stdin)
+    case exited: BlockingProcess.Exited =>
+      probe ! exited
     case "flow-complete" =>
       unstashAll()
       context become {

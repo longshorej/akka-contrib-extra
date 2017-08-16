@@ -84,22 +84,30 @@ class NonBlockingProcessSpec extends WordSpec with Matchers with BeforeAndAfterA
       }
     }
 
-    "detect when a process has exited of its own accord" ignore {
+    "detect when a process has exited while having orphaned children that live on" ignore {
+      // In this test, the children are inheriting the file descriptors and thus there's no notification for when
+      // the parent exits before the children do. Therefore, this test is ignored currently. A fix would be to
+      // manually poll the PID (if possible on current OS) and exit if we detect the PID is gone.
+      // Relevant issue: https://github.com/brettwooldridge/NuProcess/issues/13
+
       val command = getClass.getResource("/loop.sh").getFile
       new File(command).setExecutable(true)
       val nameSeed = scala.concurrent.forkjoin.ThreadLocalRandom.current().nextLong()
-      val streamProbe = TestProbe()
+      val probe = TestProbe()
       val exitProbe = TestProbe()
-      val receiver = system.actorOf(Props(new NonBlockingReceiver(streamProbe.ref, exitProbe.ref, command, List.empty, nameSeed)), "receiver" + nameSeed)
+      val receiver = system.actorOf(Props(new NonBlockingReceiver(probe.ref, exitProbe.ref, command, List.empty, nameSeed)), "receiver" + nameSeed)
       val process = Await.result(receiver.ask(NonBlockingReceiver.Process).mapTo[ActorRef], processCreationTimeout.duration)
 
-      exitProbe.watch(process)
+      probe.watch(process)
 
-      streamProbe.expectMsg(NonBlockingReceiver.Out("Starting"))
+      // send loop.sh a sigterm, which it will trap and then sigkill itself, while
+      // its child lives on
+
+      probe.expectMsg(NonBlockingReceiver.Out("ready"))
 
       process ! NonBlockingProcess.Destroy
 
-      exitProbe.fishForMessage(5.seconds) {
+      exitProbe.fishForMessage() {
         case NonBlockingProcess.Exited(r) => true
         case _                            => false
       }
@@ -162,6 +170,8 @@ class NonBlockingReceiver(streamProbe: ActorRef, exitProbe: ActorRef, command: S
         .onComplete(_ => self ! "flow-complete")
 
       Source(stdinInput).map(ByteString.apply).runWith(stdin)
+    case exited: NonBlockingProcess.Exited =>
+      exitProbe ! exited
     case "flow-complete" =>
       unstashAll()
       context become {
