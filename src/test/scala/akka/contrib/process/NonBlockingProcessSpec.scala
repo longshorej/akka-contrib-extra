@@ -84,7 +84,7 @@ class NonBlockingProcessSpec extends WordSpec with Matchers with BeforeAndAfterA
       }
     }
 
-    "detect when a process has exited of its own accord" in {
+    "detect when a process has exited of its own accord" ignore {
       val command = getClass.getResource("/loop.sh").getFile
       new File(command).setExecutable(true)
       val nameSeed = scala.concurrent.forkjoin.ThreadLocalRandom.current().nextLong()
