@@ -10,6 +10,7 @@ import akka.util.ByteString
 import java.io.File
 import java.nio.ByteBuffer
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 
 import akka.stream.stage.{ AsyncCallback, GraphStageLogic, GraphStageWithMaterializedValue, OutHandler }
 import akka.stream._
@@ -95,6 +96,8 @@ object NonBlockingProcess {
 
     override def createLogicAndMaterializedValue(inheritedAttributes: Attributes): (GraphStageLogic, PublishIfAvailableSideChannel[T]) = {
       val asyncCallback = new AtomicReference[AsyncCallback[PublishIfAvailableSideChannel.AsyncEvents]]
+      var downstreamReady = false
+      val downstreamReadyLock = new ReentrantLock
       val logic = new GraphStageLogic(shape) {
 
         override def preStart(): Unit =
@@ -107,15 +110,30 @@ object NonBlockingProcess {
           })
 
         setHandler(out, new OutHandler {
-          override def onPull(): Unit =
-            ()
+          override def onPull(): Unit = {
+            downstreamReadyLock.lock()
+            try {
+              downstreamReady = true
+            } finally {
+              downstreamReadyLock.unlock()
+            }
+          }
         })
+
       }
 
       logic -> new PublishIfAvailableSideChannel[T] {
         override def publishIfAvailable(e: () => T): Unit =
           Option(asyncCallback.get).foreach { ac =>
-            if (logic.isAvailable(out)) ac.invoke(PublishIfAvailableSideChannel.Publish(e()))
+            downstreamReadyLock.lock()
+            try {
+              if (downstreamReady) {
+                ac.invoke(PublishIfAvailableSideChannel.Publish(e()))
+                downstreamReady = false
+              }
+            } finally {
+              downstreamReadyLock.unlock()
+            }
           }
 
         override def complete(e: Option[T]): Unit =
