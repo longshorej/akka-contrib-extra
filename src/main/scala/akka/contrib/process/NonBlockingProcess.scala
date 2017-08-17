@@ -9,6 +9,8 @@ import akka.stream.scaladsl.{ BroadcastHub, Keep, Sink, Source }
 import akka.util.ByteString
 import java.io.File
 import java.nio.ByteBuffer
+import java.nio.file.Paths
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
 
@@ -19,9 +21,15 @@ import com.zaxxer.nuprocess.{ NuAbstractProcessHandler, NuProcess, NuProcessBuil
 
 import scala.collection.JavaConverters
 import scala.collection.immutable
+import scala.concurrent.duration.Duration
 import scala.concurrent.{ Future, blocking }
 
 object NonBlockingProcess {
+
+  /**
+   * The configuration key to use for the inspection interval.
+   */
+  final val InspectionInterval = "akka.process.non-blocking-process.inspection-interval"
 
   /**
    * Sent to the receiver on startup - specifies the streams used for managing input, output and error respectively.
@@ -91,7 +99,7 @@ object NonBlockingProcess {
   private[process] class PublishIfAvailable[T]
       extends GraphStageWithMaterializedValue[SourceShape[T], PublishIfAvailableSideChannel[T]] {
 
-    val out = Outlet[T]("PublishIfAvailable.out")
+    private val out = Outlet[T]("PublishIfAvailable.out")
     override def shape = SourceShape(out)
 
     override def createLogicAndMaterializedValue(inheritedAttributes: Attributes): (GraphStageLogic, PublishIfAvailableSideChannel[T]) = {
@@ -141,6 +149,12 @@ object NonBlockingProcess {
       }
     }
   }
+
+  // For additional process detection for platforms that support "/proc"
+  private[process] val procDir = Paths.get("/proc")
+  private[process] val hasProcDir = procDir.toFile.exists()
+  // For additional checking on whether a process is alive
+  private[process] case object Inspect
 }
 
 /**
@@ -161,6 +175,13 @@ class NonBlockingProcess(
     extends Actor with ActorLogging {
 
   import NonBlockingProcess._
+  import context.dispatcher
+
+  private val inspectionInterval =
+    Duration(context.system.settings.config.getDuration(InspectionInterval).toMillis, TimeUnit.MILLISECONDS)
+
+  private val inspectionTick =
+    context.system.scheduler.schedule(inspectionInterval, inspectionInterval, self, Inspect)
 
   val process: NuProcess = {
     import JavaConverters._
@@ -228,8 +249,22 @@ class NonBlockingProcess(
     case DestroyForcibly =>
       log.debug("Received request to forcibly destroy the process.")
       blocking(process.destroy(true))
+    case Inspect =>
+      val processIsRunning =
+        process.isRunning match {
+          // This additional check is needed for Linux given the lack of being able to
+          // detect based on closed file descriptors
+          case true if hasProcDir => procDir.resolve(process.getPID.toString).toFile.exists()
+          case result             => result
+        }
+      if (!processIsRunning) {
+        log.debug("Process has terminated, stopping self")
+        context.stop(self)
+      }
   }
 
-  override def postStop(): Unit =
+  override def postStop(): Unit = {
+    inspectionTick.cancel()
     process.destroy(true)
+  }
 }
