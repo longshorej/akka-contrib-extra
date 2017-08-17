@@ -108,8 +108,8 @@ class NonBlockingProcessSpec extends WordSpec with Matchers with BeforeAndAfterA
       process ! NonBlockingProcess.Destroy
 
       exitProbe.fishForMessage() {
-        case NonBlockingProcess.Exited(r) => true
-        case _                            => false
+        case NonBlockingProcess.Exited(255) => true
+        case _                              => false
       }
     }
   }
@@ -134,9 +134,14 @@ class NonBlockingProcessSpec extends WordSpec with Matchers with BeforeAndAfterA
     else
       system.stop(process)
 
-    exitProbe.expectMsgPF(10.seconds) {
-      case NonBlockingProcess.Exited(v) => v
-    } should not be 0
+    if (viaDestroy) {
+      // when sending a Destroy, we expect to get Exited. When stopping via system.stop(),
+      // we may not but we still at least to see the actor terminated (which we do via expectTerminated)
+
+      exitProbe.expectMsgPF(10.seconds) {
+        case NonBlockingProcess.Exited(v) => v
+      } should not be 0
+    }
 
     exitProbe.watch(process)
     exitProbe.expectTerminated(process, 10.seconds)

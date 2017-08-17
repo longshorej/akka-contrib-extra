@@ -4,12 +4,11 @@
 
 package akka.contrib.process
 
-import akka.actor.{ Actor, ActorLogging, NoSerializationVerificationNeeded, PoisonPill, Props }
-import akka.stream.scaladsl.{ BroadcastHub, Keep, Sink, Source }
+import akka.actor.{ Actor, ActorLogging, NoSerializationVerificationNeeded, Props }
+import akka.stream.scaladsl.{ BroadcastHub, FileIO, Keep, Sink, Source }
 import akka.util.ByteString
-import java.io.File
 import java.nio.ByteBuffer
-import java.nio.file.Paths
+import java.nio.file.{ Files, Path, Paths }
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.locks.ReentrantLock
@@ -22,7 +21,7 @@ import com.zaxxer.nuprocess.{ NuAbstractProcessHandler, NuProcess, NuProcessBuil
 import scala.collection.JavaConverters
 import scala.collection.immutable
 import scala.concurrent.duration.Duration
-import scala.concurrent.{ Future, blocking }
+import scala.concurrent.{ ExecutionContext, Future }
 
 object NonBlockingProcess {
 
@@ -76,7 +75,7 @@ object NonBlockingProcess {
    */
   def props(
     command: immutable.Seq[String],
-    workingDir: File = new File(System.getProperty("user.dir")),
+    workingDir: Path = Paths.get(System.getProperty("user.dir")),
     environment: Map[String, String] = Map.empty) =
     Props(new NonBlockingProcess(command, workingDir, environment))
 
@@ -90,6 +89,25 @@ object NonBlockingProcess {
     def publishIfAvailable(e: () => T): Unit
     def complete(e: Option[T]): Unit
   }
+
+  /**
+   * Determines if a process is still alive according to its entry in /proc/{pid}/stat. A process is considered
+   * dead if there is no stat file, or if its "State" is "Z" (zombie)
+   *
+   * More info: http://man7.org/linux/man-pages/man5/proc.5.html
+   */
+  private def procDirAlive(pid: Long)(implicit mat: ActorMaterializer, ec: ExecutionContext) =
+    FileIO.fromPath(procDir.resolve(pid.toString).resolve("stat"))
+      .runFold("")(_ + _.utf8String)
+      .map { fileData =>
+        val fields = fileData.split(' ')
+        val state = if (fields.length > 2) fields(2) else ""
+
+        state.nonEmpty && state != "Z"
+      }
+      .recover {
+        case _ => false
+      }
 
   /*
    * The motivation for this type of source is to publish *only* if any downstream
@@ -152,7 +170,7 @@ object NonBlockingProcess {
 
   // For additional process detection for platforms that support "/proc"
   private[process] val procDir = Paths.get("/proc")
-  private[process] val hasProcDir = procDir.toFile.exists()
+  private[process] val hasProcDir = Files.exists(procDir)
   // For additional checking on whether a process is alive
   private[process] case object Inspect
 }
@@ -170,7 +188,7 @@ object NonBlockingProcess {
  */
 class NonBlockingProcess(
   command: immutable.Seq[String],
-  directory: File,
+  directory: Path,
   environment: Map[String, String])
     extends Actor with ActorLogging {
 
@@ -183,6 +201,8 @@ class NonBlockingProcess(
   private val inspectionTick =
     context.system.scheduler.schedule(inspectionInterval, inspectionInterval, self, Inspect)
 
+  private val contextMat = ActorMaterializer()
+
   val process: NuProcess = {
     import JavaConverters._
 
@@ -190,9 +210,8 @@ class NonBlockingProcess(
 
     pb.environment().putAll(environment.asJava)
 
-    pb.setCwd(directory.toPath)
+    pb.setCwd(directory)
 
-    val parent = context.parent
     pb.setProcessListener(new NuAbstractProcessHandler {
       override def onPreStart(nuProcess: NuProcess): Unit = {
         // Create our stream based actors away from this one given that we want them to continue
@@ -216,7 +235,7 @@ class NonBlockingProcess(
         // FIXME: if we don't consume from stdout/stderr then we know that NuProcess will spin the CPU - see https://github.com/brettwooldridge/NuProcess/issues/53
         nuProcess.setProcessHandler(new NuAbstractProcessHandler {
           override def onStart(nuProcess: NuProcess): Unit =
-            parent ! Started(nuProcess.getPID, stdin, stdout, stderr)
+            self ! Started(nuProcess.getPID, stdin, stdout, stderr)
 
           override def onStderr(buffer: ByteBuffer, closed: Boolean): Unit =
             if (!closed)
@@ -224,10 +243,8 @@ class NonBlockingProcess(
             else
               err.complete(if (buffer.hasRemaining) Some(ByteString.fromByteBuffer(buffer)) else None)
 
-          override def onExit(exitCode: Int): Unit = {
-            parent ! NonBlockingProcess.Exited(exitCode)
-            self ! PoisonPill
-          }
+          override def onExit(exitCode: Int): Unit =
+            self ! Exited(exitCode)
 
           override def onStdout(buffer: ByteBuffer, closed: Boolean): Unit =
             if (!closed)
@@ -243,23 +260,28 @@ class NonBlockingProcess(
   }
 
   override def receive: Receive = {
+    case s: Started =>
+      context.parent ! s
+    case e: Exited =>
+      context.parent ! e
+      context.stop(self)
     case Destroy =>
       log.debug("Received request to destroy the process.")
-      blocking(process.destroy(false))
+      process.destroy(false)
     case DestroyForcibly =>
       log.debug("Received request to forcibly destroy the process.")
-      blocking(process.destroy(true))
+      process.destroy(true)
     case Inspect =>
-      val processIsRunning =
-        process.isRunning match {
-          // This additional check is needed for Linux given the lack of being able to
-          // detect based on closed file descriptors
-          case true if hasProcDir => procDir.resolve(process.getPID.toString).toFile.exists()
-          case result             => result
+      if (process.isRunning && hasProcDir) {
+        // If NuProcess maintains we are running, we need to double-check as we could have died and children
+        // could still be alive and holding onto file descriptors.
+
+        procDirAlive(process.getPID)(contextMat, implicitly).map { alive =>
+          if (!alive) {
+            log.debug("Process has terminated, killing self")
+            self ! Exited(255)
+          }
         }
-      if (!processIsRunning) {
-        log.debug("Process has terminated, stopping self")
-        context.stop(self)
       }
   }
 
